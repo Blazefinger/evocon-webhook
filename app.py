@@ -38,7 +38,7 @@ def webhook():
         text = data.get("text", "")
         print("Webhook text:", text)
 
-        # Parse from format: "TecnoPack2- 2025-06-03 00:23:59 - 2100878"
+        # Parse from format: "TecnoPack2 - 2025-06-03 00:38:59 - 2100878"
         try:
             parts = text.strip().split("-")
             if len(parts) < 3:
@@ -47,17 +47,19 @@ def webhook():
             event_time_str = parts[1].strip()
             production_order_id = parts[2].strip()
 
-            # Convert to Europe/Athens time zone
             local_tz = pytz.timezone("Europe/Athens")
             event_time_naive = parser.parse(event_time_str)
             event_time = local_tz.localize(event_time_naive)
             eventTimeISO = event_time.strftime("%Y-%m-%dT%H:%M:%S.000%z")
             eventTimeISO = eventTimeISO[:-2] + ":" + eventTimeISO[-2:]
 
+            print("Parsed time:", eventTimeISO)
+            print("Parsed productionOrderId:", production_order_id)
+
         except Exception as e:
             return {"error": "Failed to parse webhook text", "details": str(e)}, 400
 
-        # Fetch jobs from Evocon
+        # Fetch job list from EVOCON
         job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = {
             "Authorization": f"Basic {get_auth_header()}",
@@ -69,13 +71,16 @@ def webhook():
         jobs = jobs_response.json()
         print("Jobs fetched:", json.dumps(jobs, indent=2))
 
-        # Match job by productionOrder
         job = next((j for j in jobs if str(j.get("productionOrder")) == production_order_id), None)
 
         if not job:
             return {"error": f"No job found with productionOrder {production_order_id}"}, 404
 
-        # Prepare and send changeover
+        print("DEBUG - stationId:", STATION_ID)
+        print("DEBUG - jobId:", job["id"])
+        print("DEBUG - eventTimeISO:", eventTimeISO)
+        print("DEBUG - unitId:", job.get("unitId", "pcs"))
+
         changeover_payload = {
             "jobId": job["id"],
             "plannedQty": job["plannedQty"],
@@ -91,7 +96,8 @@ def webhook():
         changeover_url = f"https://api.evocon.com/api/batches/{STATION_ID}"
         post_response = requests.post(changeover_url, headers=headers, json=changeover_payload)
 
-        print("Evocon response:", post_response.status_code, post_response.text)
+        print("Evocon status code:", post_response.status_code)
+        print("Evocon full response:", post_response.text)
 
         return {
             "posted_changeover": changeover_payload,
