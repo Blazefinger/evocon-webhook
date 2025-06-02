@@ -8,9 +8,15 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# Load and validate environment variables
 EVOCON_TENANT = os.environ.get("EVOCON_TENANT")
 EVOCON_SECRET = os.environ.get("EVOCON_SECRET")
-STATION_ID = int(os.environ.get("EVOCON_STATION_ID", 4))
+STATION_ID = os.environ.get("EVOCON_STATION_ID")
+
+if not all([EVOCON_TENANT, EVOCON_SECRET, STATION_ID]):
+    raise RuntimeError("Missing one or more required environment variables: EVOCON_TENANT, EVOCON_SECRET, EVOCON_STATION_ID")
+
+STATION_ID = int(STATION_ID)
 
 def get_auth_header():
     credentials = f"{EVOCON_TENANT}:{EVOCON_SECRET}".encode()
@@ -19,18 +25,16 @@ def get_auth_header():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        # Raw logging
-        print("----- Incoming Webhook -----")
-        print("Raw request body:", request.data)
+        print("\n----- Incoming Webhook -----")
+        print("Raw body:", request.data)
         print("Headers:", dict(request.headers))
 
         data = request.get_json(force=True, silent=True)
         if not data:
-            print("No JSON body received.")
+            print("No JSON received")
             return {"error": "Invalid or empty JSON"}, 400
 
         print("Parsed JSON:", json.dumps(data, indent=2))
-
         text = data.get("text", "")
         print("Webhook text:", text)
 
@@ -39,6 +43,7 @@ def webhook():
         except Exception as e:
             return {"error": "Invalid text format", "details": str(e)}, 400
 
+        # Fetch jobs
         job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = {
             "Authorization": f"Basic {get_auth_header()}",
@@ -48,12 +53,12 @@ def webhook():
 
         jobs_response = requests.get(job_list_url, headers=headers)
         jobs = jobs_response.json()
-        print("Fetched jobs:", json.dumps(jobs, indent=2))
+        print("Jobs fetched:", json.dumps(jobs, indent=2))
 
         job = next((j for j in jobs if str(j.get("productionOrderId")) == production_order_id), None)
 
         if not job:
-            print(f"No job found with productionOrderId {production_order_id}")
+            print(f"No job found for productionOrderId: {production_order_id}")
             return {"error": f"No job found with productionOrderId {production_order_id}"}, 404
 
         changeover_payload = {
@@ -81,4 +86,9 @@ def webhook():
 
     except Exception as err:
         print("Unhandled error:", str(err))
-        return {"error": "Server error", "details": str(err)}, 500
+        return {"error": "Internal server error", "details": str(err)}, 500
+
+# Required for Railway hosting (bind to 0.0.0.0 and port 8080)
+if __name__ == "__main__":
+    print("Starting Flask app on 0.0.0.0:8080...")
+    app.run(host="0.0.0.0", port=8080)
