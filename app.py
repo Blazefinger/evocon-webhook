@@ -25,7 +25,12 @@ def webhook():
         raw_body = request.data
         print(f"Raw body: {raw_body}")
 
-        data = request.get_json()
+        try:
+            data = json.loads(raw_body)
+        except Exception as e:
+            print(f"⚠️ Failed to parse JSON: {e}")
+            return "Bad JSON", 400
+
         print(f"Parsed JSON: {json.dumps(data, indent=2)}")
 
         text = data.get("text", "")
