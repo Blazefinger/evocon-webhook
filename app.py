@@ -1,4 +1,3 @@
-
 from flask import Flask, request
 import requests
 import base64
@@ -10,12 +9,13 @@ import pytz
 
 app = Flask(__name__)
 
+# Load environment variables
 EVOCON_TENANT = os.environ.get("EVOCON_TENANT")
 EVOCON_SECRET = os.environ.get("EVOCON_SECRET")
 STATION_ID = os.environ.get("EVOCON_STATION_ID")
 
 if not all([EVOCON_TENANT, EVOCON_SECRET, STATION_ID]):
-    raise RuntimeError("Missing one or more required environment variables: EVOCON_TENANT, EVOCON_SECRET, EVOCON_STATION_ID")
+    raise RuntimeError("Missing one or more required environment variables.")
 
 STATION_ID = int(STATION_ID)
 
@@ -32,30 +32,35 @@ def webhook():
 
         data = request.get_json(force=True, silent=True)
         if not data:
-            print("No JSON received")
             return {"error": "Invalid or empty JSON"}, 400
 
         print("Parsed JSON:", json.dumps(data, indent=2))
         text = data.get("text", "")
         print("Webhook text:", text)
 
-        # Extract productionOrderId and local event time from text
+        # Parse from format: "TecnoPack2- 2025-06-03 00:23:59 - 2100878"
         try:
             parts = text.strip().split("-")
-            event_time_str = parts[1].strip()  # e.g., "2025-06-02 00:16:00"
-            production_order_id = parts[2].strip()  # e.g., "2100878"
+            if len(parts) < 3:
+                raise ValueError("Expected format: StationName - Timestamp - OrderNumber")
 
+            event_time_str = parts[1].strip()
+            production_order_id = parts[2].strip()
+
+            # Convert to Europe/Athens time zone
             local_tz = pytz.timezone("Europe/Athens")
             event_time_naive = parser.parse(event_time_str)
             event_time = local_tz.localize(event_time_naive)
             eventTimeISO = event_time.strftime("%Y-%m-%dT%H:%M:%S.000%z")
             eventTimeISO = eventTimeISO[:-2] + ":" + eventTimeISO[-2:]
-        except Exception as e:
-            return {"error": "Invalid webhook format", "details": str(e)}, 400
 
+        except Exception as e:
+            return {"error": "Failed to parse webhook text", "details": str(e)}, 400
+
+        # Fetch jobs from Evocon
         job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = {
-            "Authorization": f"Basic " + get_auth_header(),
+            "Authorization": f"Basic {get_auth_header()}",
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
@@ -64,12 +69,13 @@ def webhook():
         jobs = jobs_response.json()
         print("Jobs fetched:", json.dumps(jobs, indent=2))
 
+        # Match job by productionOrder
         job = next((j for j in jobs if str(j.get("productionOrder")) == production_order_id), None)
 
         if not job:
-            print(f"No job found for productionOrder: {production_order_id}")
             return {"error": f"No job found with productionOrder {production_order_id}"}, 404
 
+        # Prepare and send changeover
         changeover_payload = {
             "jobId": job["id"],
             "plannedQty": job["plannedQty"],
