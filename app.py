@@ -1,4 +1,3 @@
-
 from flask import Flask, request
 import requests
 import base64
@@ -43,7 +42,6 @@ def webhook():
         except Exception as e:
             return {"error": "Invalid text format", "details": str(e)}, 400
 
-        # Fetch jobs
         job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = {
             "Authorization": f"Basic {get_auth_header()}",
@@ -55,11 +53,12 @@ def webhook():
         jobs = jobs_response.json()
         print("Jobs fetched:", json.dumps(jobs, indent=2))
 
-        job = next((j for j in jobs if str(j.get("productionOrderId")) == production_order_id), None)
+        # ✅ Corrected this line to use 'productionOrder'
+        job = next((j for j in jobs if str(j.get("productionOrder")) == production_order_id), None)
 
         if not job:
-            print(f"No job found for productionOrderId: {production_order_id}")
-            return {"error": f"No job found with productionOrderId {production_order_id}"}, 404
+            print(f"No job found for productionOrder: {production_order_id}")
+            return {"error": f"No job found with productionOrder {production_order_id}"}, 404
 
         changeover_payload = {
             "jobId": job["id"],
@@ -88,7 +87,6 @@ def webhook():
         print("Unhandled error:", str(err))
         return {"error": "Internal server error", "details": str(err)}, 500
 
-# Required for Railway hosting (bind to 0.0.0.0 and port 8080)
 if __name__ == "__main__":
     print("Starting Flask app on 0.0.0.0:8080...")
     app.run(host="0.0.0.0", port=8080)
