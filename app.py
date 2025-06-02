@@ -1,13 +1,15 @@
+
 from flask import Flask, request
 import requests
 import base64
 import json
 import os
 from datetime import datetime
+from dateutil import parser
+import pytz
 
 app = Flask(__name__)
 
-# Load and validate environment variables
 EVOCON_TENANT = os.environ.get("EVOCON_TENANT")
 EVOCON_SECRET = os.environ.get("EVOCON_SECRET")
 STATION_ID = os.environ.get("EVOCON_STATION_ID")
@@ -37,14 +39,23 @@ def webhook():
         text = data.get("text", "")
         print("Webhook text:", text)
 
+        # Extract productionOrderId and local event time from text
         try:
-            production_order_id = text.strip().split("-")[-1].strip()
+            parts = text.strip().split("-")
+            event_time_str = parts[1].strip()  # e.g., "2025-06-02 00:16:00"
+            production_order_id = parts[2].strip()  # e.g., "2100878"
+
+            local_tz = pytz.timezone("Europe/Athens")
+            event_time_naive = parser.parse(event_time_str)
+            event_time = local_tz.localize(event_time_naive)
+            eventTimeISO = event_time.strftime("%Y-%m-%dT%H:%M:%S.000%z")
+            eventTimeISO = eventTimeISO[:-2] + ":" + eventTimeISO[-2:]
         except Exception as e:
-            return {"error": "Invalid text format", "details": str(e)}, 400
+            return {"error": "Invalid webhook format", "details": str(e)}, 400
 
         job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = {
-            "Authorization": f"Basic {get_auth_header()}",
+            "Authorization": f"Basic " + get_auth_header(),
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
@@ -53,7 +64,6 @@ def webhook():
         jobs = jobs_response.json()
         print("Jobs fetched:", json.dumps(jobs, indent=2))
 
-        # ✅ Corrected this line to use 'productionOrder'
         job = next((j for j in jobs if str(j.get("productionOrder")) == production_order_id), None)
 
         if not job:
@@ -66,7 +76,7 @@ def webhook():
             "unitQty": job.get("unitQuantity", 1),
             "notes": f"Auto CO for {production_order_id}",
             "unitId": job.get("unitId", "pcs"),
-            "eventTimeISO": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000+03:00"),
+            "eventTimeISO": eventTimeISO,
             "lotCode": f"CO-{production_order_id}"
         }
 
