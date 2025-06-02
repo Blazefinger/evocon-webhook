@@ -1,114 +1,105 @@
 from flask import Flask, request
 import requests
-import base64
 import json
-import os
 from datetime import datetime
-from dateutil import parser
-import pytz
+import re
 
 app = Flask(__name__)
 
-# Load environment variables
-EVOCON_TENANT = os.environ.get("EVOCON_TENANT")
-EVOCON_SECRET = os.environ.get("EVOCON_SECRET")
-STATION_ID = os.environ.get("EVOCON_STATION_ID")
+# === CONFIG ===
+STATION_ID = 3
+USERNAME = "your_evocon_username"
+PASSWORD = "your_evocon_password"
 
-if not all([EVOCON_TENANT, EVOCON_SECRET, STATION_ID]):
-    raise RuntimeError("Missing one or more required environment variables.")
+# === UTILS ===
+def evocon_auth_header():
+    from base64 import b64encode
+    token = b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
-STATION_ID = int(STATION_ID)
-
-def get_auth_header():
-    credentials = f"{EVOCON_TENANT}:{EVOCON_SECRET}".encode()
-    return base64.b64encode(credentials).decode()
-
-@app.route("/webhook", methods=["POST"])
+# === ROUTE ===
+@app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        print("\n----- Incoming Webhook -----")
-        print("Raw body:", request.data)
-        print("Headers:", dict(request.headers))
+        print("\n\n----- Incoming Webhook -----")
+        raw_body = request.data
+        print(f"Raw body: {raw_body}")
 
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            return {"error": "Invalid or empty JSON"}, 400
+        data = request.get_json()
+        print(f"Parsed JSON: {json.dumps(data, indent=2)}")
 
-        print("Parsed JSON:", json.dumps(data, indent=2))
         text = data.get("text", "")
-        print("Webhook text:", text)
+        print(f"Webhook text: {text}")
 
-        # Parse from format: "TecnoPack2 - 2025-06-03 00:38:59 - 2100878"
-        try:
-            parts = text.strip().split("-")
-            if len(parts) < 3:
-                raise ValueError("Expected format: StationName - Timestamp - OrderNumber")
+        # Extract station, timestamp, and order using regex
+        match = re.search(r'(?P<station>.+)-\s*(?P<dt>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*-\s*(?P<order>\d+)', text)
+        if not match:
+            print("⚠️ Failed to parse input string.")
+            return "Bad input", 400
 
-            event_time_str = parts[1].strip()
-            production_order_id = parts[2].strip()
+        station_name = match.group("station").strip()
+        event_time_str = match.group("dt").strip()
+        production_order = match.group("order").strip()
 
-            local_tz = pytz.timezone("Europe/Athens")
-            event_time_naive = parser.parse(event_time_str)
-            event_time = local_tz.localize(event_time_naive)
-            eventTimeISO = event_time.strftime("%Y-%m-%dT%H:%M:%S.000%z")
-            eventTimeISO = eventTimeISO[:-2] + ":" + eventTimeISO[-2:]
+        print(f"Parsed station: {station_name}")
+        print(f"Parsed time: {event_time_str}")
+        print(f"Parsed productionOrderId: {production_order}")
 
-            print("Parsed time:", eventTimeISO)
-            print("Parsed productionOrderId:", production_order_id)
+        # Convert event time to ISO 8601 format with +03:00
+        event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
+        event_time_iso = event_time.strftime("%Y-%m-%dT%H:%M:%S.000+03:00")
 
-        except Exception as e:
-            return {"error": "Failed to parse webhook text", "details": str(e)}, 400
+        # Step 1: Fetch all jobs for the station
+        job_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
+        headers = evocon_auth_header()
+        response = requests.get(job_url, headers=headers)
 
-        # Fetch job list from EVOCON
-        job_list_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
-        headers = {
-            "Authorization": f"Basic {get_auth_header()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
+        if response.status_code != 200:
+            print(f"❌ Failed to fetch jobs: {response.status_code} {response.text}")
+            return "Job fetch failed", 500
+
+        jobs = response.json()
+        print("Jobs fetched:")
+        print(json.dumps(jobs, indent=2))
+
+        # Step 2: Find the job that matches the production order
+        matching_job = next((job for job in jobs if job["orderNumber"] == production_order), None)
+
+        if not matching_job:
+            print(f"❌ No job found for order number {production_order}")
+            return "Job not found", 404
+
+        job_id = matching_job["id"]
+        planned_qty = matching_job["plannedQty"]
+        unit_qty = 1
+        unit_id = matching_job["unitId"]
+        notes = f"Auto CO for {production_order}"
+        lot_code = f"CO-{production_order}"
+
+        payload = {
+            "jobId": job_id,
+            "plannedQty": planned_qty,
+            "unitQty": unit_qty,
+            "notes": notes,
+            "unitId": unit_id,
+            "eventTimeISO": event_time_iso,
+            "lotCode": lot_code
         }
 
-        jobs_response = requests.get(job_list_url, headers=headers)
-        jobs = jobs_response.json()
-        print("Jobs fetched:", json.dumps(jobs, indent=2))
+        print("Posting changeover payload:")
+        print(json.dumps(payload, indent=2))
 
-        job = next((j for j in jobs if str(j.get("productionOrder")) == production_order_id), None)
+        post_url = f"https://api.evocon.com/api/batches/{STATION_ID}"
+        post_response = requests.post(post_url, headers={**headers, "Content-Type": "application/json"}, json=payload)
 
-        if not job:
-            return {"error": f"No job found with productionOrder {production_order_id}"}, 404
+        print(f"Evocon response: {post_response.status_code} {post_response.text}")
+        return "OK", 200
 
-        print("DEBUG - stationId:", STATION_ID)
-        print("DEBUG - jobId:", job["id"])
-        print("DEBUG - eventTimeISO:", eventTimeISO)
-        print("DEBUG - unitId:", job.get("unitId", "pcs"))
+    except Exception as e:
+        print(f"⚠️ Exception: {e}")
+        return "Error", 500
 
-        changeover_payload = {
-            "jobId": job["id"],
-            "plannedQty": job["plannedQty"],
-            "unitQty": job.get("unitQuantity", 1),
-            "notes": f"Auto CO for {production_order_id}",
-            "unitId": job.get("unitId", "pcs"),
-            "eventTimeISO": eventTimeISO,
-            "lotCode": f"CO-{production_order_id}"
-        }
-
-        print("Posting changeover payload:", json.dumps(changeover_payload, indent=2))
-
-        changeover_url = f"https://api.evocon.com/api/batches/{STATION_ID}"
-        post_response = requests.post(changeover_url, headers=headers, json=changeover_payload)
-
-        print("Evocon status code:", post_response.status_code)
-        print("Evocon full response:", post_response.text)
-
-        return {
-            "posted_changeover": changeover_payload,
-            "evocon_response": post_response.text,
-            "status": post_response.status_code
-        }, post_response.status_code
-
-    except Exception as err:
-        print("Unhandled error:", str(err))
-        return {"error": "Internal server error", "details": str(err)}, 500
-
-if __name__ == "__main__":
+# === MAIN ===
+if __name__ == '__main__':
     print("Starting Flask app on 0.0.0.0:8080...")
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host='0.0.0.0', port=8080)
