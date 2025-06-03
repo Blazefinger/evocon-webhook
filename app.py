@@ -9,14 +9,13 @@ from base64 import b64encode
 app = Flask(__name__)
 
 # === ENVIRONMENT VARIABLES ===
-STATION_ID = os.getenv("EVOCON_STATION_ID")
 EVOCON_TENANT = os.getenv("EVOCON_TENANT")
 EVOCON_SECRET = os.getenv("EVOCON_SECRET")
 
-if not STATION_ID or not EVOCON_TENANT or not EVOCON_SECRET:
-    raise RuntimeError("❌ Missing required environment variables: EVOCON_TENANT, EVOCON_SECRET, EVOCON_STATION_ID")
+if not EVOCON_TENANT or not EVOCON_SECRET:
+    raise RuntimeError("❌ Missing required environment variables: EVOCON_TENANT or EVOCON_SECRET")
 
-STATION_ID = int(STATION_ID)
+TARGET_STATIONS = [3, 4, 5, 6]
 
 def evocon_auth_header():
     token = b64encode(f"{EVOCON_TENANT}:{EVOCON_SECRET}".encode()).decode()
@@ -44,7 +43,7 @@ def webhook():
         print(f"Webhook text: {text}")
 
         # Extract station, timestamp, and order using regex
-        match = re.search(r'(?P<station>.+)-\s*(?P<dt>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*-\s*(?P<order>\d+)', text)
+        match = re.search(r'(?P<station>.+)-\s*(?P<dt>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*-\s*(?P<order>.+)', text)
         if not match:
             print("⚠️ Failed to parse input string.")
             return "Bad input format", 400
@@ -61,45 +60,48 @@ def webhook():
         event_time = datetime.strptime(event_time_str, "%Y-%m-%d %H:%M:%S")
         event_time_iso = event_time.strftime("%Y-%m-%dT%H:%M:%S.000+03:00")
 
-        # Step 1: Fetch jobs
-        job_url = f"https://api.evocon.com/api/jobs?stationId={STATION_ID}"
         headers = evocon_auth_header()
-        response = requests.get(job_url, headers=headers)
 
-        print(f"Job fetch response: {response.status_code}")
-        if response.status_code != 200:
-            print(f"❌ Failed to fetch jobs: {response.status_code} {response.text}")
-            return "Job fetch failed", response.status_code
+        for station_id in TARGET_STATIONS:
+            print(f"\n🌀 Checking jobs for stationId {station_id}")
+            job_url = f"https://api.evocon.com/api/jobs?stationId={station_id}"
+            response = requests.get(job_url, headers=headers)
 
-        jobs = response.json()
-        print("Jobs fetched:")
-        print(json.dumps(jobs, indent=2))
+            if response.status_code != 200:
+                print(f"❌ Failed to fetch jobs for station {station_id}: {response.status_code} {response.text}")
+                continue
 
-        # Step 2: Match job by productionOrder
-        job = next((j for j in jobs if str(j.get("orderNumber")) == production_order), None)
+            jobs = response.json()
+            print(f"✅ Jobs fetched for station {station_id}")
 
-        if not job:
-            print(f"❌ No job found for productionOrder {production_order}")
-            return "Job not found", 404
+            # Match job by productionOrder
+            job = next((j for j in jobs if str(j.get("orderNumber")) == production_order), None)
+            if not job:
+                print(f"❌ No job found for productionOrder {production_order} on station {station_id}")
+                continue
 
-        payload = {
-            "jobId": job["id"],
-            "plannedQty": job["plannedQty"],
-            "unitQty": 1,
-            "notes": f"Auto CO for {production_order}",
-            "unitId": job["unitId"],
-            "eventTimeISO": event_time_iso,
-            "lotCode": f"CO-{production_order}"
-        }
+            payload = {
+                "jobId": job["id"],
+                "plannedQty": job["plannedQty"],
+                "unitQty": 1,
+                "notes": f"Auto CO for {production_order}",
+                "unitId": job["unitId"],
+                "eventTimeISO": event_time_iso,
+                "lotCode": f"CO-{production_order}"
+            }
 
-        print("Posting changeover payload:")
-        print(json.dumps(payload, indent=2))
+            print(f"🌀 Posting changeover to station {station_id}")
+            print(json.dumps(payload, indent=2))
 
-        changeover_url = f"https://api.evocon.com/api/batches/{STATION_ID}"
-        post_response = requests.post(changeover_url, headers=headers, json=payload)
+            changeover_url = f"https://api.evocon.com/api/batches/{station_id}"
+            post_response = requests.post(changeover_url, headers=headers, json=payload)
 
-        print(f"Evocon response: {post_response.status_code} {post_response.text}")
-        return "OK", post_response.status_code
+            if post_response.status_code == 200:
+                print(f"✅ Changeover posted successfully to station {station_id}")
+            else:
+                print(f"❌ Failed to post changeover to station {station_id}: {post_response.status_code} {post_response.text}")
+
+        return "Processed", 200
 
     except Exception as e:
         print(f"⚠️ Exception: {e}")
